@@ -7,14 +7,17 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
-import android.content.Intent
-import android.net.Uri
-import android.view.View
 import android.webkit.WebSettings
+import android.content.Intent
+import android.graphics.Color
+import android.view.View
+import android.widget.TextView
+import android.widget.LinearLayout
+import android.util.Log
 
 class MainActivity : Activity() {
 
-    private lateinit var webView: WebView
+    private var webView: WebView? = null
 
     private val appUrl =
         "https://creep1020.github.io/1-book/"
@@ -22,81 +25,124 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        webView = WebView(this)
+        try {
+            val browser = WebView(this)
+            webView = browser
 
-        webView.settings.apply {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            databaseEnabled = true
-            cacheMode = WebSettings.LOAD_DEFAULT
-            mediaPlaybackRequiresUserGesture = false
+            browser.settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                databaseEnabled = true
+                cacheMode = WebSettings.LOAD_DEFAULT
+                mediaPlaybackRequiresUserGesture = false
+                allowFileAccess = false
+                allowContentAccess = false
+                mixedContentMode =
+                    WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            }
 
-            allowFileAccess = false
-            allowContentAccess = false
-            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-        }
+            browser.webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(
+                    view: WebView,
+                    request: WebResourceRequest
+                ): Boolean {
+                    val uri = request.url
 
-        webView.webViewClient = object : WebViewClient() {
+                    val isAppPage =
+                        uri.scheme == "https" &&
+                        uri.host == "creep1020.github.io" &&
+                        uri.path?.startsWith("/1-book") == true
 
-            override fun shouldOverrideUrlLoading(
-                view: WebView,
-                request: WebResourceRequest
-            ): Boolean {
+                    if (isAppPage) return false
 
-                val uri = request.url
-
-                val isAppPage =
-                    uri.scheme == "https" &&
-                    uri.host == "creep1020.github.io" &&
-                    uri.path?.startsWith("/1-book") == true
-
-                if (isAppPage) {
-                    return false
+                    if (uri.scheme == "https" || uri.scheme == "http") {
+                        try {
+                            startActivity(
+                                Intent(Intent.ACTION_VIEW, uri)
+                            )
+                        } catch (e: Exception) {
+                            Log.e("Ilbbang", "외부 링크 오류", e)
+                        }
+                    }
+                    return true
                 }
 
-                if (uri.scheme == "https" || uri.scheme == "http") {
-                    try {
-                        startActivity(
-                            Intent(Intent.ACTION_VIEW, uri)
+                override fun onReceivedError(
+                    view: WebView,
+                    request: WebResourceRequest,
+                    error: android.webkit.WebResourceError
+                ) {
+                    super.onReceivedError(view, request, error)
+
+                    if (request.isForMainFrame) {
+                        showError(
+                            "페이지를 불러오지 못했습니다.\n" +
+                            error.description
                         )
-                    } catch (_: Exception) {
                     }
                 }
-
-                return true
             }
-        }
 
-        webView.webChromeClient = WebChromeClient()
+            browser.webChromeClient = WebChromeClient()
 
-        webView.systemUiVisibility =
-            View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            browser.systemUiVisibility =
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
 
-        setContentView(webView)
+            setContentView(browser)
 
-        if (savedInstanceState == null) {
-            webView.loadUrl(appUrl)
-        } else {
-            webView.restoreState(savedInstanceState)
+            if (savedInstanceState == null) {
+                browser.loadUrl(appUrl)
+            } else {
+                val restored = browser.restoreState(savedInstanceState)
+                if (restored == null) {
+                    browser.loadUrl(appUrl)
+                }
+            }
+
+        } catch (e: Exception) {
+            Log.e("Ilbbang", "앱 실행 오류", e)
+            showError(
+                "앱 실행 중 오류가 발생했습니다.\n\n" +
+                (e.message ?: e.toString())
+            )
         }
     }
 
+    private fun showError(message: String) {
+        val text = TextView(this).apply {
+            this.text = message
+            textSize = 16f
+            setTextColor(Color.BLACK)
+            setPadding(40, 60, 40, 40)
+        }
+
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            addView(text)
+        }
+
+        setContentView(layout)
+    }
+
     override fun onSaveInstanceState(outState: Bundle) {
-        webView.saveState(outState)
+        webView?.saveState(outState)
         super.onSaveInstanceState(outState)
     }
 
     @Deprecated("Deprecated in Android")
     override fun onBackPressed() {
-        if (webView.canGoBack()) {
-            webView.goBack()
+        val browser = webView
+        if (browser?.canGoBack() == true) {
+            browser.goBack()
         } else {
             super.onBackPressed()
         }
     }
 
     override fun onDestroy() {
-        webView.destroy()
+        webView?.destroy()
+        webView = null
         super.onDestroy()
     }
 }
