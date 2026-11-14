@@ -19,7 +19,7 @@ class MainActivity : Activity() {
     private var webView: WebView? = null
 
     private val appUrl =
-        "https://creep1020.github.io/1-book/"
+        "https://creep1020.github.io/1-book/I-ll-bang-1"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
