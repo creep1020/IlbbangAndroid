@@ -19,7 +19,7 @@ class MainActivity : Activity() {
     private var webView: WebView? = null
 
     private val appUrl =
-        "https://creep1020.github.io/1-book/I-ll-bang-1/"
+        "https://creep1020.github.io/I-ll-bang-1/"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,7 +51,7 @@ class MainActivity : Activity() {
                     val isAppPage =
                         uri.scheme == "https" &&
                         uri.host == "creep1020.github.io" &&
-                        uri.path?.startsWith("/1-book") == true
+                        uri.path?.startsWith("/I-ll-bang-1") == true
 
                     if (isAppPage) return false
 
