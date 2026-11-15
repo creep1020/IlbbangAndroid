@@ -31,10 +31,12 @@ import com.google.mlkit.genai.speechrecognition.SpeechRecognizerResponse
 import com.google.mlkit.genai.speechrecognition.SpeechRecognizerOptions
 import com.google.mlkit.genai.speechrecognition.speechRecognizerOptions
 import com.google.mlkit.genai.speechrecognition.speechRecognizerRequest
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -55,6 +57,7 @@ class MainActivity : ComponentActivity() {
     private var pendingMode = ""
     private var recordingActive = false
     private var processingWatchdog: Runnable? = null
+    private var processingJob: Job? = null
 
     companion object {
         private const val TAG = "IlbbangVoice"
@@ -150,6 +153,29 @@ class MainActivity : ComponentActivity() {
                 startNativeRecording()
             }
         }
+
+        @JavascriptInterface
+        fun cancelRecording(requestId: String) {
+            runOnUiThread {
+                if (isTrustedPage()) cancelNativeVoice(requestId)
+            }
+        }
+    }
+
+    private fun cancelNativeVoice(requestId: String) {
+        if (requestId.isBlank() || pendingRequestId != requestId) return
+        Log.w(TAG, "네이티브 음성 요청 취소: requestId=$requestId")
+        recordingRunnable?.let { handler.removeCallbacks(it) }
+        recordingRunnable = null
+        processingWatchdog?.let { handler.removeCallbacks(it) }
+        processingWatchdog = null
+        releaseRecorder()
+        processingJob?.cancel()
+        processingJob = null
+        recordingFile?.delete()
+        recordingFile = null
+        pendingRequestId = ""
+        pendingMode = ""
     }
 
     private fun isTrustedPage(): Boolean {
@@ -239,9 +265,11 @@ class MainActivity : ComponentActivity() {
         processingWatchdog = Runnable {
             if (pendingRequestId == requestId) {
                 Log.e(TAG, "네이티브 처리 감시 시간 초과: requestId=$requestId")
+                processingJob?.cancel()
+                processingJob = null
                 sendVoiceResult(
                     requestId, mode, "", null,
-                    "음성인식 처리가 응답하지 않아 종료했어요. 앱을 다시 열고 한 번 더 시도해 주세요."
+                    "음성인식 처리가 응답하지 않아 종료했어요. 다시 녹음해 주세요."
                 )
                 pendingRequestId = ""
                 pendingMode = ""
@@ -251,7 +279,7 @@ class MainActivity : ComponentActivity() {
         // 녹음 직후에는 모델 준비 단계를 별도로 알립니다.
         sendVoiceStatus(requestId, "preparing")
 
-        lifecycleScope.launch {
+        processingJob = lifecycleScope.launch {
             var transcript = ""
             var recognitionError = ""
             var audioBase64: String? = null
@@ -268,6 +296,10 @@ class MainActivity : ComponentActivity() {
             } catch (e: TimeoutCancellationException) {
                 Log.w(TAG, "음성인식 또는 모델 준비 시간 초과", e)
                 recognitionError = "음성 확인 시간이 길어졌어요. 다시 한 번 천천히 말해 주세요."
+            } catch (e: CancellationException) {
+                Log.i(TAG, "음성인식 작업 취소: requestId=$requestId")
+                file.delete()
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "ML Kit 인식 오류", e)
                 recognitionError = e.message ?: "음성인식에 실패했습니다."
@@ -296,6 +328,7 @@ class MainActivity : ComponentActivity() {
                 pendingRequestId = ""
                 pendingMode = ""
             }
+            if (processingJob?.isActive == false) processingJob = null
             processingWatchdog?.let { handler.removeCallbacks(it) }
             processingWatchdog = null
         }
@@ -471,6 +504,8 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         processingWatchdog?.let { handler.removeCallbacks(it) }
         processingWatchdog = null
+        processingJob?.cancel()
+        processingJob = null
         releaseRecorder()
         webView?.removeJavascriptInterface("IlbbangAndroid")
         webView?.destroy()
