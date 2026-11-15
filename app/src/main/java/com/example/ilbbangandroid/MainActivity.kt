@@ -53,6 +53,7 @@ class MainActivity : ComponentActivity() {
     private var pendingRequestId = ""
     private var pendingMode = ""
     private var recordingActive = false
+    private var processingWatchdog: Runnable? = null
 
     companion object {
         private const val TAG = "IlbbangVoice"
@@ -60,6 +61,7 @@ class MainActivity : ComponentActivity() {
         private const val RECORDING_TIME = 5000L
         private const val RECOGNITION_TIMEOUT = 30000L
         private const val MODEL_DOWNLOAD_TIMEOUT = 60000L
+        private const val PROCESSING_WATCHDOG_TIMEOUT = 95000L
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -230,6 +232,21 @@ class MainActivity : ComponentActivity() {
 
         val requestId = pendingRequestId
         val mode = pendingMode
+        Log.d(TAG, "녹음 완료: requestId=$requestId, mode=$mode, bytes=${file.length()}")
+        // ML Kit 흐름이 예기치 않게 멈춰도 네이티브 요청 잠금이 영구히 남지 않도록 감시합니다.
+        processingWatchdog?.let { handler.removeCallbacks(it) }
+        processingWatchdog = Runnable {
+            if (pendingRequestId == requestId) {
+                Log.e(TAG, "네이티브 처리 감시 시간 초과: requestId=$requestId")
+                sendVoiceResult(
+                    requestId, mode, "", null,
+                    "음성인식 처리가 응답하지 않아 종료했어요. 앱을 다시 열고 한 번 더 시도해 주세요."
+                )
+                pendingRequestId = ""
+                pendingMode = ""
+            }
+            processingWatchdog = null
+        }.also { handler.postDelayed(it, PROCESSING_WATCHDOG_TIMEOUT) }
         // 녹음 직후에는 모델 준비 단계를 별도로 알립니다.
         sendVoiceStatus(requestId, "preparing")
 
@@ -239,11 +256,14 @@ class MainActivity : ComponentActivity() {
             var audioBase64: String? = null
 
             try {
+                Log.d(TAG, "ML Kit 인식 작업 시작: requestId=$requestId")
                 transcript = withContext(Dispatchers.IO) {
                     recognizeAudio(file) {
+                        Log.d(TAG, "ML Kit 인식 단계 진입: requestId=$requestId")
                         sendVoiceStatus(requestId, "recognizing")
                     }
                 }
+                Log.d(TAG, "ML Kit 인식 작업 종료: requestId=$requestId, transcriptLength=${transcript.length}")
             } catch (e: TimeoutCancellationException) {
                 Log.w(TAG, "음성인식 또는 모델 준비 시간 초과", e)
                 recognitionError = "음성 확인 시간이 길어졌어요. 다시 한 번 천천히 말해 주세요."
@@ -269,11 +289,14 @@ class MainActivity : ComponentActivity() {
             if (transcript.isBlank() && recognitionError.isBlank()) {
                 recognitionError = "음성을 인식하지 못했습니다."
             }
+            Log.d(TAG, "웹뷰로 최종 결과 전달: requestId=$requestId, error=$recognitionError")
             sendVoiceResult(requestId, mode, transcript, audioBase64, recognitionError)
             if (pendingRequestId == requestId) {
                 pendingRequestId = ""
                 pendingMode = ""
             }
+            processingWatchdog?.let { handler.removeCallbacks(it) }
+            processingWatchdog = null
         }
     }
 
@@ -285,6 +308,7 @@ class MainActivity : ComponentActivity() {
         val recognizer = SpeechRecognition.getClient(options)
         try {
             val status = recognizer.checkStatus()
+            Log.d(TAG, "ML Kit 모델 상태: $status")
             when (status) {
                 FeatureStatus.AVAILABLE -> Unit
                 FeatureStatus.DOWNLOADABLE -> {
@@ -292,6 +316,7 @@ class MainActivity : ComponentActivity() {
                     var downloadError = ""
                     withTimeout(MODEL_DOWNLOAD_TIMEOUT) {
                         recognizer.download().collect { result ->
+                            Log.d(TAG, "ML Kit 모델 다운로드 상태: ${result::class.java.simpleName}")
                             when (result) {
                                 is DownloadStatus.DownloadCompleted -> completed = true
                                 is DownloadStatus.DownloadFailed ->
@@ -317,6 +342,7 @@ class MainActivity : ComponentActivity() {
                 // 녹음 파일 처리와 최종 응답까지 충분히 기다립니다.
                 withTimeout(RECOGNITION_TIMEOUT) {
                     recognizer.startRecognition(request).collect { response ->
+                        Log.d(TAG, "ML Kit 응답: ${response::class.java.simpleName}")
                         when (response) {
                             is SpeechRecognizerResponse.FinalTextResponse ->
                                 recognizedText = response.text
@@ -340,7 +366,16 @@ class MainActivity : ComponentActivity() {
             "window.onIlbbangNativeVoiceStatus(" +
             "${JSONObject.quote(requestId)}," +
             "${JSONObject.quote(status)});"
-        webView?.post { webView?.evaluateJavascript(js, null) }
+        webView?.post {
+            val browser = webView
+            if (browser == null) {
+                Log.e(TAG, "상태 전달 실패: WebView가 없습니다. status=$status")
+            } else {
+                browser.evaluateJavascript(js) { value ->
+                    Log.d(TAG, "상태 전달 완료: status=$status, jsResult=$value")
+                }
+            }
+        }
     }
 
     private fun sendVoiceError(
@@ -373,7 +408,16 @@ class MainActivity : ComponentActivity() {
         }
         val js = "window.onIlbbangNativeVoiceResult && " +
             "window.onIlbbangNativeVoiceResult($result);"
-        webView?.post { webView?.evaluateJavascript(js, null) }
+        webView?.post {
+            val browser = webView
+            if (browser == null) {
+                Log.e(TAG, "최종 결과 전달 실패: WebView가 없습니다. requestId=$requestId")
+            } else {
+                browser.evaluateJavascript(js) { value ->
+                    Log.d(TAG, "최종 결과 JS 실행 결과: requestId=$requestId, jsResult=$value")
+                }
+            }
+        }
     }
 
     private fun releaseRecorder() {
@@ -413,6 +457,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        processingWatchdog?.let { handler.removeCallbacks(it) }
+        processingWatchdog = null
         releaseRecorder()
         webView?.removeJavascriptInterface("IlbbangAndroid")
         webView?.destroy()
