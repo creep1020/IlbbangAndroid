@@ -34,6 +34,7 @@ import com.google.mlkit.genai.speechrecognition.speechRecognizerRequest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -307,31 +308,40 @@ class MainActivity : ComponentActivity() {
         }
         val recognizer = SpeechRecognition.getClient(options)
         try {
+            sendVoiceStatus(pendingRequestId, "checking")
             val status = recognizer.checkStatus()
             Log.d(TAG, "ML Kit 모델 상태: $status")
             when (status) {
-                FeatureStatus.AVAILABLE -> Unit
+                FeatureStatus.AVAILABLE -> {
+                    Log.d(TAG, "ML Kit 모델이 이미 준비되어 있습니다.")
+                    sendVoiceStatus(pendingRequestId, "model-ready")
+                }
                 FeatureStatus.DOWNLOADABLE -> {
-                    var completed = false
-                    var downloadError = ""
-                    withTimeout(MODEL_DOWNLOAD_TIMEOUT) {
-                        recognizer.download().collect { result ->
-                            Log.d(TAG, "ML Kit 모델 다운로드 상태: ${result::class.java.simpleName}")
-                            when (result) {
-                                is DownloadStatus.DownloadCompleted -> completed = true
-                                is DownloadStatus.DownloadFailed ->
-                                    downloadError = result.e.message ?: "모델 다운로드 실패"
-                                else -> Unit
-                            }
+                    sendVoiceStatus(pendingRequestId, "downloading")
+                    // 다운로드 Flow가 계속 열려 있을 수 있으므로 완료/실패의 첫 종결 이벤트만 기다립니다.
+                    val terminal = withTimeout(MODEL_DOWNLOAD_TIMEOUT) {
+                        recognizer.download().first { result ->
+                            result is DownloadStatus.DownloadCompleted ||
+                                result is DownloadStatus.DownloadFailed
                         }
                     }
-                    if (downloadError.isNotBlank()) throw Exception(downloadError)
-                    if (!completed) throw Exception("음성인식 모델 다운로드가 완료되지 않았습니다.")
+                    when (terminal) {
+                        is DownloadStatus.DownloadCompleted -> {
+                            Log.d(TAG, "ML Kit 모델 다운로드 완료")
+                            sendVoiceStatus(pendingRequestId, "model-ready")
+                        }
+                        is DownloadStatus.DownloadFailed -> {
+                            val message = terminal.e.message ?: "모델 다운로드 실패"
+                            Log.e(TAG, "ML Kit 모델 다운로드 실패: $message", terminal.e)
+                            throw Exception(message)
+                        }
+                        else -> throw Exception("음성인식 모델 다운로드 상태를 확인하지 못했습니다.")
+                    }
                 }
                 FeatureStatus.DOWNLOADING ->
                     throw Exception("음성인식 모델을 다운로드 중입니다. 잠시 후 다시 시도해 주세요.")
                 else ->
-                    throw Exception("이 기기에서 영어 음성인식을 사용할 수 없습니다.")
+                    throw Exception("이 기기에서 영어 음성인식을 사용할 수 없습니다. 모델 상태: $status")
             }
 
             val audioSource = AudioSource.fromFile(file)
@@ -348,6 +358,8 @@ class MainActivity : ComponentActivity() {
                                 recognizedText = response.text
                             is SpeechRecognizerResponse.ErrorResponse ->
                                 throw Exception(response.e.message ?: "음성인식 처리 오류")
+                            is SpeechRecognizerResponse.CompletedResponse ->
+                                Log.d(TAG, "ML Kit 인식 완료 이벤트 수신")
                             else -> Unit
                         }
                     }
