@@ -171,7 +171,14 @@ class MainActivity : ComponentActivity() {
 
             runOnUiThread {
 
-                if (!isTrustedPage()) return@runOnUiThread
+                if (!isTrustedPage()) {
+    Log.e(TAG, "신뢰할 수 없는 페이지 주소: ${webView?.url}")
+    sendVoiceError(
+        requestId,
+        "앱 주소 확인 오류: ${webView?.url}"
+    )
+    return@runOnUiThread
+}
 
                 if (mode != "sentence" && mode != "review") {
                     sendVoiceError(requestId, "잘못된 녹음 요청입니다.")
