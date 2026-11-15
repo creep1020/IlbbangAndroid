@@ -1,3 +1,4 @@
+
 package com.example.ilbbangandroid
 
 import android.Manifest
@@ -31,8 +32,10 @@ import com.google.mlkit.genai.speechrecognition.SpeechRecognizerResponse
 import com.google.mlkit.genai.speechrecognition.SpeechRecognizerOptions
 import com.google.mlkit.genai.speechrecognition.speechRecognizerOptions
 import com.google.mlkit.genai.speechrecognition.speechRecognizerRequest
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -56,6 +59,9 @@ class MainActivity : ComponentActivity() {
 
     private var recordingActive = false
     private var processingActive = false
+
+    private var recognitionJob: Job? = null
+    private var recognitionTimeoutRunnable: Runnable? = null
 
     companion object {
         private const val TAG = "IlbbangVoice"
@@ -107,9 +113,7 @@ class MainActivity : ComponentActivity() {
 
                     if (uri.scheme == "https" || uri.scheme == "http") {
                         try {
-                            startActivity(
-                                Intent(Intent.ACTION_VIEW, uri)
-                            )
+                            startActivity(Intent(Intent.ACTION_VIEW, uri))
                         } catch (e: Exception) {
                             Log.e(TAG, "외부 링크 오류", e)
                         }
@@ -142,9 +146,7 @@ class MainActivity : ComponentActivity() {
                 browser.loadUrl(appUrl)
             } else {
                 val restored = browser.restoreState(savedInstanceState)
-                if (restored == null) {
-                    browser.loadUrl(appUrl)
-                }
+                if (restored == null) browser.loadUrl(appUrl)
             }
 
         } catch (e: Exception) {
@@ -153,9 +155,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --------------------------------------------------
     // JavaScript 연결
-    // --------------------------------------------------
 
     private inner class NativeVoiceBridge {
 
@@ -165,19 +165,12 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
 
                 if (!isTrustedPage()) {
-                    Log.e(TAG, "신뢰할 수 없는 페이지: ${webView?.url}")
-                    sendVoiceError(
-                        requestId,
-                        "앱 주소 확인 오류"
-                    )
+                    sendVoiceError(requestId, "앱 주소 확인 오류")
                     return@runOnUiThread
                 }
 
                 if (mode != "sentence" && mode != "review") {
-                    sendVoiceError(
-                        requestId,
-                        "잘못된 녹음 요청입니다."
-                    )
+                    sendVoiceError(requestId, "잘못된 녹음 요청입니다.")
                     return@runOnUiThread
                 }
 
@@ -216,9 +209,7 @@ class MainActivity : ComponentActivity() {
             uri.path?.startsWith("/I-ll-bang-1") == true
     }
 
-    // --------------------------------------------------
     // 마이크 권한
-    // --------------------------------------------------
 
     override fun onRequestPermissionsResult(
         requestCode: Int,
@@ -232,7 +223,6 @@ class MainActivity : ComponentActivity() {
         )
 
         if (requestCode == MIC_PERMISSION) {
-
             if (
                 grantResults.isNotEmpty() &&
                 grantResults[0] == PackageManager.PERMISSION_GRANTED
@@ -247,9 +237,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --------------------------------------------------
     // 5초 녹음
-    // --------------------------------------------------
 
     private fun startNativeRecording() {
 
@@ -274,7 +262,6 @@ class MainActivity : ComponentActivity() {
                 setAudioEncodingBitRate(64000)
                 setAudioChannels(1)
                 setOutputFile(file.absolutePath)
-
                 prepare()
                 start()
             }
@@ -283,10 +270,7 @@ class MainActivity : ComponentActivity() {
             recordingFile = file
             recordingActive = true
 
-            sendVoiceStatus(
-                pendingRequestId,
-                "recording"
-            )
+            sendVoiceStatus(pendingRequestId, "recording")
 
             recordingRunnable = Runnable {
                 finishNativeRecording()
@@ -298,11 +282,8 @@ class MainActivity : ComponentActivity() {
             )
 
         } catch (e: Exception) {
-
             Log.e(TAG, "녹음 시작 실패", e)
-
             releaseRecorder()
-
             sendVoiceError(
                 pendingRequestId,
                 "녹음을 시작하지 못했습니다: ${e.message}"
@@ -310,9 +291,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --------------------------------------------------
-    // 녹음 종료 후 음성인식 시작
-    // --------------------------------------------------
+    // 녹음 종료 및 음성인식 시작
 
     private fun finishNativeRecording() {
 
@@ -323,7 +302,6 @@ class MainActivity : ComponentActivity() {
         recordingRunnable?.let {
             handler.removeCallbacks(it)
         }
-
         recordingRunnable = null
 
         val activeRecorder = recorder
@@ -343,13 +321,8 @@ class MainActivity : ComponentActivity() {
         val file = recordingFile
         recordingFile = null
 
-        if (
-            file == null ||
-            !file.exists() ||
-            file.length() == 0L
-        ) {
+        if (file == null || !file.exists() || file.length() == 0L) {
             file?.delete()
-
             sendVoiceError(
                 pendingRequestId,
                 "녹음 파일을 만들지 못했습니다."
@@ -362,90 +335,174 @@ class MainActivity : ComponentActivity() {
 
         processingActive = true
 
-        sendVoiceStatus(
-            requestId,
-            "preparing"
-        )
+        sendVoiceStatus(requestId, "preparing")
 
-        lifecycleScope.launch {
+        recognitionJob = lifecycleScope.launch {
 
-            var transcript = ""
-            var recognitionError = ""
             var audioBase64: String? = null
 
             try {
 
-                transcript = withContext(Dispatchers.IO) {
-                    recognizeAudio(file) {
+                // 문장 모드는 녹음 데이터를 먼저 확보합니다.
+                // 시간 초과가 발생해도 재생용 녹음 파일을 전달할 수 있습니다.
 
-                        sendVoiceStatus(
-                            requestId,
-                            "recognizing"
-                        )
-                    }
-                }
-
-            } catch (e: Exception) {
-
-                Log.e(TAG, "음성인식 오류", e)
-
-                recognitionError =
-                    e.message ?: "음성인식에 실패했습니다."
-            }
-
-            // 문장 학습에서는 기존 녹음 재생 기능을 위해
-            // 녹음 파일을 Base64로 전달합니다.
-
-            if (mode == "sentence") {
-
-                try {
+                if (mode == "sentence") {
                     audioBase64 = withContext(Dispatchers.IO) {
                         Base64.encodeToString(
                             file.readBytes(),
                             Base64.NO_WRAP
                         )
                     }
+                }
 
-                } catch (e: Exception) {
+                val recordedAudioBase64 = audioBase64
 
-                    Log.e(TAG, "녹음 데이터 변환 실패", e)
+                val transcript = withContext(Dispatchers.IO) {
 
-                    if (recognitionError.isBlank()) {
-                        recognitionError =
-                            "녹음 데이터를 전달하지 못했습니다."
+                    recognizeAudio(file) {
+
+                        // 실제로 음성인식이 시작되는 순간
+                        // 화면 상태를 바꾸고 별도 5초 타이머를 시작합니다.
+
+                        runOnUiThread {
+
+                            if (
+                                pendingRequestId == requestId &&
+                                processingActive
+                            ) {
+
+                                sendVoiceStatus(
+                                    requestId,
+                                    "recognizing"
+                                )
+
+                                startRecognitionTimeout(
+                                    requestId,
+                                    mode,
+                                    recordedAudioBase64
+                                )
+                            }
+                        }
                     }
                 }
+
+                deliverVoiceResult(
+                    requestId,
+                    mode,
+                    transcript,
+                    recordedAudioBase64,
+                    ""
+                )
+
+            } catch (e: CancellationException) {
+
+                Log.d(TAG, "음성인식 작업 취소")
+
+                throw e
+
+            } catch (e: Exception) {
+
+                Log.e(TAG, "음성인식 오류", e)
+
+                deliverVoiceResult(
+                    requestId,
+                    mode,
+                    "",
+                    audioBase64,
+                    e.message ?: "음성인식에 실패했습니다."
+                )
+
+            } finally {
+
+                file.delete()
             }
-
-            file.delete()
-
-            if (
-                transcript.isBlank() &&
-                recognitionError.isBlank()
-            ) {
-                recognitionError = "음성을 인식하지 못했습니다."
-            }
-
-            sendVoiceResult(
-                requestId,
-                mode,
-                transcript,
-                audioBase64,
-                recognitionError
-            )
-
-            if (pendingRequestId == requestId) {
-                pendingRequestId = ""
-                pendingMode = ""
-            }
-
-            processingActive = false
         }
     }
 
-    // --------------------------------------------------
+    // 핵심: 인식 중 별도 5초 타이머
+
+    private fun startRecognitionTimeout(
+        requestId: String,
+        mode: String,
+        audioBase64: String?
+    ) {
+
+        cancelRecognitionTimeout()
+
+        val timeoutTask = Runnable {
+
+            if (
+                pendingRequestId == requestId &&
+                processingActive
+            ) {
+
+                Log.w(TAG, "별도 음성인식 타이머 5초 초과")
+
+                // 먼저 인식 작업 취소를 요청합니다.
+                recognitionJob?.cancel()
+
+                // 인식 작업의 종료를 기다리지 않고
+                // 즉시 웹페이지에 실패 결과를 전달합니다.
+
+                deliverVoiceResult(
+                    requestId,
+                    mode,
+                    "",
+                    audioBase64,
+                    "음성 확인이 5초 안에 끝나지 않았어요. 다시 녹음해 주세요."
+                )
+            }
+        }
+
+        recognitionTimeoutRunnable = timeoutTask
+
+        handler.postDelayed(
+            timeoutTask,
+            RECOGNITION_TIMEOUT
+        )
+    }
+
+    private fun cancelRecognitionTimeout() {
+
+        recognitionTimeoutRunnable?.let {
+            handler.removeCallbacks(it)
+        }
+
+        recognitionTimeoutRunnable = null
+    }
+
+    // 결과를 한 번만 전달
+
+    private fun deliverVoiceResult(
+        requestId: String,
+        mode: String,
+        transcript: String,
+        audioBase64: String?,
+        error: String
+    ) {
+
+        // 이미 시간 초과 결과를 전달했다면
+        // 뒤늦게 도착한 인식 결과는 무시합니다.
+
+        if (pendingRequestId != requestId) return
+
+        cancelRecognitionTimeout()
+
+        sendVoiceResult(
+            requestId,
+            mode,
+            transcript,
+            audioBase64,
+            error
+        )
+
+        pendingRequestId = ""
+        pendingMode = ""
+        processingActive = false
+        recognitionJob = null
+    }
+
     // ML Kit 음성인식
-    // --------------------------------------------------
 
     private suspend fun recognizeAudio(
         file: File,
@@ -462,7 +519,7 @@ class MainActivity : ComponentActivity() {
 
         try {
 
-            // 1. 모델 상태 확인
+            // 모델 상태 확인
 
             val status = recognizer.checkStatus()
 
@@ -471,31 +528,22 @@ class MainActivity : ComponentActivity() {
             when (status) {
 
                 FeatureStatus.AVAILABLE -> {
-                    Log.d(TAG, "음성인식 모델 준비 완료")
+                    Log.d(TAG, "모델 준비 완료")
                 }
 
                 FeatureStatus.DOWNLOADABLE -> {
 
-                    Log.d(TAG, "음성인식 모델 다운로드 시작")
+                    Log.d(TAG, "모델 다운로드 시작")
 
-                    val downloadResult = try {
+                    val result = withTimeout(MODEL_DOWNLOAD_TIMEOUT) {
 
-                        withTimeout(MODEL_DOWNLOAD_TIMEOUT) {
-
-                            recognizer.download().first {
-                                it is DownloadStatus.DownloadCompleted ||
-                                it is DownloadStatus.DownloadFailed
-                            }
+                        recognizer.download().first {
+                            it is DownloadStatus.DownloadCompleted ||
+                            it is DownloadStatus.DownloadFailed
                         }
-
-                    } catch (e: TimeoutCancellationException) {
-
-                        throw Exception(
-                            "음성인식 모델 다운로드가 60초 안에 끝나지 않았습니다. 인터넷 연결을 확인하고 다시 시도해 주세요."
-                        )
                     }
 
-                    when (downloadResult) {
+                    when (result) {
 
                         is DownloadStatus.DownloadCompleted -> {
                             Log.d(TAG, "모델 다운로드 완료")
@@ -503,35 +551,28 @@ class MainActivity : ComponentActivity() {
 
                         is DownloadStatus.DownloadFailed -> {
                             throw Exception(
-                                downloadResult.e.message
-                                    ?: "음성인식 모델 다운로드 실패"
+                                result.e.message ?: "모델 다운로드 실패"
                             )
                         }
 
                         else -> {
-                            throw Exception(
-                                "음성인식 모델을 준비하지 못했습니다."
-                            )
+                            throw Exception("모델 준비 실패")
                         }
                     }
                 }
 
                 FeatureStatus.DOWNLOADING -> {
-
                     throw Exception(
                         "음성인식 모델을 다운로드 중입니다. 잠시 후 다시 시도해 주세요."
                     )
                 }
 
                 else -> {
-
                     throw Exception(
                         "이 기기에서 영어 음성인식을 사용할 수 없습니다."
                     )
                 }
             }
-
-            // 2. 녹음 파일 불러오기
 
             val audioSource = AudioSource.fromFile(file)
 
@@ -541,47 +582,23 @@ class MainActivity : ComponentActivity() {
                     this.audioSource = audioSource
                 }
 
+                // 여기서 화면에 음성 확인 중을 표시하고
+                // 별도 5초 타이머를 작동시킵니다.
+
                 onRecognitionStarted()
 
                 Log.d(TAG, "실제 음성인식 시작")
 
-                // 3. 최종 결과 또는 오류가 도착하면 즉시 종료
-                // CompletedResponse까지 무작정 기다리지 않습니다.
+                // 최종 결과 또는 오류가 도착하면 즉시 반환합니다.
 
-                val response = try {
+                val response = recognizer.startRecognition(request).first {
 
-                    withTimeout(RECOGNITION_TIMEOUT) {
-
-                        recognizer.startRecognition(request).first {
-
-                            it is SpeechRecognizerResponse.FinalTextResponse ||
-                            it is SpeechRecognizerResponse.ErrorResponse ||
-                            it is SpeechRecognizerResponse.CompletedResponse
-                        }
-                    }
-
-                } catch (e: TimeoutCancellationException) {
-
-                    Log.w(TAG, "음성인식 제한시간 초과")
-
-                    try {
-                        recognizer.stopRecognition()
-                    } catch (stopError: Exception) {
-                        Log.e(
-                            TAG,
-                            "음성인식 중지 오류",
-                            stopError
-                        )
-                    }
-
-                    throw Exception(
-                        "음성 확인이 5초 안에 끝나지 않았어요. 조금 천천히 다시 말해 주세요."
-                    )
+                    it is SpeechRecognizerResponse.FinalTextResponse ||
+                    it is SpeechRecognizerResponse.ErrorResponse ||
+                    it is SpeechRecognizerResponse.CompletedResponse
                 }
 
-                // 4. 응답 처리
-
-                when (response) {
+                return when (response) {
 
                     is SpeechRecognizerResponse.FinalTextResponse -> {
 
@@ -590,28 +607,18 @@ class MainActivity : ComponentActivity() {
                             "인식 결과: ${response.text}"
                         )
 
-                        return response.text
+                        response.text
                     }
 
                     is SpeechRecognizerResponse.ErrorResponse -> {
 
-                        Log.e(
-                            TAG,
-                            "ML Kit 오류: ${response.e.message}"
-                        )
-
                         throw Exception(
                             response.e.message
-                                ?: "음성인식 처리 중 오류가 발생했습니다."
+                                ?: "음성인식 처리 오류"
                         )
                     }
 
                     is SpeechRecognizerResponse.CompletedResponse -> {
-
-                        Log.d(
-                            TAG,
-                            "음성인식 완료 신호 수신"
-                        )
 
                         throw Exception(
                             "인식된 문장이 없습니다. 다시 말해 주세요."
@@ -619,27 +626,34 @@ class MainActivity : ComponentActivity() {
                     }
 
                     else -> {
-
-                        throw Exception(
-                            "음성인식 결과를 처리하지 못했습니다."
-                        )
+                        throw Exception("음성인식 결과 처리 오류")
                     }
                 }
 
             } finally {
-
                 audioSource.close()
             }
 
         } finally {
 
-            recognizer.close()
+            // 취소된 경우에도 정리 작업은 수행합니다.
+            withContext(NonCancellable) {
+                try {
+                    recognizer.stopRecognition()
+                } catch (e: Exception) {
+                    Log.e(TAG, "인식 중지 오류", e)
+                }
+
+                try {
+                    recognizer.close()
+                } catch (e: Exception) {
+                    Log.e(TAG, "인식기 정리 오류", e)
+                }
+            }
         }
     }
 
-    // --------------------------------------------------
-    // 웹페이지로 상태 전달
-    // --------------------------------------------------
+    // 웹페이지에 상태 전달
 
     private fun sendVoiceStatus(
         requestId: String,
@@ -657,9 +671,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --------------------------------------------------
     // 오류 전달
-    // --------------------------------------------------
 
     private fun sendVoiceError(
         requestId: String,
@@ -667,29 +679,18 @@ class MainActivity : ComponentActivity() {
     ) {
 
         val mode =
-            if (pendingRequestId == requestId) {
-                pendingMode
-            } else {
-                ""
-            }
+            if (pendingRequestId == requestId) pendingMode else ""
 
-        sendVoiceResult(
+        deliverVoiceResult(
             requestId,
             mode,
             "",
             null,
             message
         )
-
-        if (pendingRequestId == requestId) {
-            pendingRequestId = ""
-            pendingMode = ""
-        }
     }
 
-    // --------------------------------------------------
     // 인식 결과 전달
-    // --------------------------------------------------
 
     private fun sendVoiceResult(
         requestId: String,
@@ -700,16 +701,10 @@ class MainActivity : ComponentActivity() {
     ) {
 
         val result = JSONObject().apply {
-
             put("requestId", requestId)
             put("mode", mode)
             put("transcript", transcript)
-
-            put(
-                "audioBase64",
-                audioBase64 ?: JSONObject.NULL
-            )
-
+            put("audioBase64", audioBase64 ?: JSONObject.NULL)
             put("mimeType", "audio/mp4")
             put("error", error)
         }
@@ -723,9 +718,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --------------------------------------------------
     // 녹음기 정리
-    // --------------------------------------------------
 
     private fun releaseRecorder() {
 
@@ -747,9 +740,7 @@ class MainActivity : ComponentActivity() {
         recordingFile = null
     }
 
-    // --------------------------------------------------
     // 오류 화면
-    // --------------------------------------------------
 
     private fun showError(message: String) {
 
@@ -769,20 +760,14 @@ class MainActivity : ComponentActivity() {
         setContentView(layout)
     }
 
-    // --------------------------------------------------
     // 화면 상태 저장
-    // --------------------------------------------------
 
     override fun onSaveInstanceState(outState: Bundle) {
-
         webView?.saveState(outState)
-
         super.onSaveInstanceState(outState)
     }
 
-    // --------------------------------------------------
     // 뒤로가기
-    // --------------------------------------------------
 
     @Deprecated("Deprecated in Android")
     override fun onBackPressed() {
@@ -796,18 +781,18 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // --------------------------------------------------
     // 앱 종료
-    // --------------------------------------------------
 
     override fun onDestroy() {
 
+        cancelRecognitionTimeout()
+
+        recognitionJob?.cancel()
+        recognitionJob = null
+
         releaseRecorder()
 
-        webView?.removeJavascriptInterface(
-            "IlbbangAndroid"
-        )
-
+        webView?.removeJavascriptInterface("IlbbangAndroid")
         webView?.destroy()
         webView = null
 
