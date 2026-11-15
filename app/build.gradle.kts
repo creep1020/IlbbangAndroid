@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.ilbbangandroid"
         minSdk = 30
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     compileOptions {
@@ -31,4 +31,6 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-ktx:1.10.1")
     implementation("androidx.webkit:webkit:1.12.1")
+
+    implementation("com.google.mlkit:genai-speech-recognition:1.0.0-alpha2")
 }
