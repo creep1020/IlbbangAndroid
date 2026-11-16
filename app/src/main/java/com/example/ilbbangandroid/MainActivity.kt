@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.speech.tts.TextToSpeech
 import android.util.Base64
 import android.util.Log
 import android.webkit.JavascriptInterface
@@ -31,12 +32,10 @@ import com.google.mlkit.genai.speechrecognition.SpeechRecognizerResponse
 import com.google.mlkit.genai.speechrecognition.SpeechRecognizerOptions
 import com.google.mlkit.genai.speechrecognition.speechRecognizerOptions
 import com.google.mlkit.genai.speechrecognition.speechRecognizerRequest
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -47,6 +46,10 @@ import java.util.Locale
 class MainActivity : ComponentActivity() {
 
     private var webView: WebView? = null
+    private var textToSpeech: TextToSpeech? = null
+    private var ttsReady = false
+    private var pendingTtsText: String? = null
+    private var pendingTtsRate = 0.85f
     private val appUrl = "https://creep1020.github.io/I-ll-bang-1/"
     private val handler = Handler(Looper.getMainLooper())
 
@@ -57,7 +60,6 @@ class MainActivity : ComponentActivity() {
     private var pendingMode = ""
     private var recordingActive = false
     private var processingWatchdog: Runnable? = null
-    private var processingJob: Job? = null
 
     companion object {
         private const val TAG = "IlbbangVoice"
@@ -70,6 +72,24 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        textToSpeech = TextToSpeech(this) { status ->
+            runOnUiThread {
+                ttsReady = status == TextToSpeech.SUCCESS
+                if (ttsReady) {
+                    try { textToSpeech?.language = Locale.US } catch (e: Exception) {
+                        Log.e(TAG, "영어 TTS 언어 설정 실패", e)
+                    }
+                    val queued = pendingTtsText
+                    if (!queued.isNullOrBlank()) {
+                        val rate = pendingTtsRate
+                        pendingTtsText = null
+                        speakNative(queued, rate)
+                    }
+                } else {
+                    Log.e(TAG, "기기 TTS 엔진 초기화 실패: status=$status")
+                }
+            }
+        }
         try {
             val browser = WebView(this)
             webView = browser
@@ -153,43 +173,60 @@ class MainActivity : ComponentActivity() {
                 startNativeRecording()
             }
         }
-
         @JavascriptInterface
         fun stopRecording(requestId: String) {
             runOnUiThread {
-                if (!isTrustedPage() || requestId.isBlank() || pendingRequestId != requestId) return@runOnUiThread
+                if (!isTrustedPage() || pendingRequestId != requestId) return@runOnUiThread
                 if (recordingActive) {
-                    Log.d(TAG, "사용자 요청으로 녹음 조기 종료: requestId=$requestId")
+                    Log.d(TAG, "웹에서 녹음 종료 요청: requestId=$requestId")
                     finishNativeRecording()
                 } else {
-                    // 녹음이 끝나고 인식 중이면 현재 인식 결과를 기다립니다.
-                    sendVoiceStatus(requestId, "recognizing")
+                    // 녹음은 이미 끝나고 모델 준비/인식 중입니다. 처리 작업은 중단하지 않습니다.
+                    sendVoiceStatus(requestId, "processing")
                 }
             }
         }
 
         @JavascriptInterface
-        fun cancelRecording(requestId: String) {
+        fun speak(text: String, rate: Double) {
             runOnUiThread {
-                if (isTrustedPage()) cancelNativeVoice(requestId)
+                if (!isTrustedPage()) return@runOnUiThread
+                val safeText = text.take(500)
+                if (safeText.isBlank()) return@runOnUiThread
+                pendingTtsText = safeText
+                pendingTtsRate = rate.toFloat().coerceIn(0.5f, 2.0f)
+                if (ttsReady) {
+                    pendingTtsText = null
+                    speakNative(safeText, pendingTtsRate)
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun stopSpeaking() {
+            runOnUiThread {
+                pendingTtsText = null
+                try { textToSpeech?.stop() } catch (e: Exception) {
+                    Log.w(TAG, "TTS 중지 실패", e)
+                }
             }
         }
     }
 
-    private fun cancelNativeVoice(requestId: String) {
-        if (requestId.isBlank() || pendingRequestId != requestId) return
-        Log.w(TAG, "네이티브 음성 요청 취소: requestId=$requestId")
-        recordingRunnable?.let { handler.removeCallbacks(it) }
-        recordingRunnable = null
-        processingWatchdog?.let { handler.removeCallbacks(it) }
-        processingWatchdog = null
-        releaseRecorder()
-        processingJob?.cancel()
-        processingJob = null
-        recordingFile?.delete()
-        recordingFile = null
-        pendingRequestId = ""
-        pendingMode = ""
+    private fun speakNative(text: String, rate: Float) {
+        if (!ttsReady) {
+            pendingTtsText = text
+            pendingTtsRate = rate
+            return
+        }
+        try {
+            val engine = textToSpeech ?: return
+            engine.language = Locale.US
+            engine.setSpeechRate(rate.coerceIn(0.5f, 2.0f))
+            engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "ilbbang_tts_${System.currentTimeMillis()}")
+        } catch (e: Exception) {
+            Log.e(TAG, "네이티브 영어 음성 재생 실패", e)
+        }
     }
 
     private fun isTrustedPage(): Boolean {
@@ -279,11 +316,9 @@ class MainActivity : ComponentActivity() {
         processingWatchdog = Runnable {
             if (pendingRequestId == requestId) {
                 Log.e(TAG, "네이티브 처리 감시 시간 초과: requestId=$requestId")
-                processingJob?.cancel()
-                processingJob = null
                 sendVoiceResult(
                     requestId, mode, "", null,
-                    "음성인식 처리가 응답하지 않아 종료했어요. 다시 녹음해 주세요."
+                    "음성인식 처리가 응답하지 않아 종료했어요. 앱을 다시 열고 한 번 더 시도해 주세요."
                 )
                 pendingRequestId = ""
                 pendingMode = ""
@@ -293,7 +328,7 @@ class MainActivity : ComponentActivity() {
         // 녹음 직후에는 모델 준비 단계를 별도로 알립니다.
         sendVoiceStatus(requestId, "preparing")
 
-        processingJob = lifecycleScope.launch {
+        lifecycleScope.launch {
             var transcript = ""
             var recognitionError = ""
             var audioBase64: String? = null
@@ -310,10 +345,6 @@ class MainActivity : ComponentActivity() {
             } catch (e: TimeoutCancellationException) {
                 Log.w(TAG, "음성인식 또는 모델 준비 시간 초과", e)
                 recognitionError = "음성 확인 시간이 길어졌어요. 다시 한 번 천천히 말해 주세요."
-            } catch (e: CancellationException) {
-                Log.i(TAG, "음성인식 작업 취소: requestId=$requestId")
-                file.delete()
-                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "ML Kit 인식 오류", e)
                 recognitionError = e.message ?: "음성인식에 실패했습니다."
@@ -337,14 +368,11 @@ class MainActivity : ComponentActivity() {
                 recognitionError = "음성을 인식하지 못했습니다."
             }
             Log.d(TAG, "웹뷰로 최종 결과 전달: requestId=$requestId, error=$recognitionError")
+            sendVoiceResult(requestId, mode, transcript, audioBase64, recognitionError)
             if (pendingRequestId == requestId) {
-                sendVoiceResult(requestId, mode, transcript, audioBase64, recognitionError)
                 pendingRequestId = ""
                 pendingMode = ""
-            } else {
-                Log.w(TAG, "이미 취소되거나 교체된 요청이므로 결과 전달 생략: requestId=$requestId")
             }
-            if (processingJob?.isActive == false) processingJob = null
             processingWatchdog?.let { handler.removeCallbacks(it) }
             processingWatchdog = null
         }
@@ -520,12 +548,14 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         processingWatchdog?.let { handler.removeCallbacks(it) }
         processingWatchdog = null
-        processingJob?.cancel()
-        processingJob = null
         releaseRecorder()
         webView?.removeJavascriptInterface("IlbbangAndroid")
         webView?.destroy()
         webView = null
+        try { textToSpeech?.stop() } catch (_: Exception) {}
+        try { textToSpeech?.shutdown() } catch (_: Exception) {}
+        textToSpeech = null
+        ttsReady = false
         super.onDestroy()
     }
 }
