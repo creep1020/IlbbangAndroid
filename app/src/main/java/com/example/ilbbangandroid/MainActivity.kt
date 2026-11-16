@@ -155,6 +155,20 @@ class MainActivity : ComponentActivity() {
         }
 
         @JavascriptInterface
+        fun stopRecording(requestId: String) {
+            runOnUiThread {
+                if (!isTrustedPage() || requestId.isBlank() || pendingRequestId != requestId) return@runOnUiThread
+                if (recordingActive) {
+                    Log.d(TAG, "사용자 요청으로 녹음 조기 종료: requestId=$requestId")
+                    finishNativeRecording()
+                } else {
+                    // 녹음이 끝나고 인식 중이면 현재 인식 결과를 기다립니다.
+                    sendVoiceStatus(requestId, "recognizing")
+                }
+            }
+        }
+
+        @JavascriptInterface
         fun cancelRecording(requestId: String) {
             runOnUiThread {
                 if (isTrustedPage()) cancelNativeVoice(requestId)
@@ -323,10 +337,12 @@ class MainActivity : ComponentActivity() {
                 recognitionError = "음성을 인식하지 못했습니다."
             }
             Log.d(TAG, "웹뷰로 최종 결과 전달: requestId=$requestId, error=$recognitionError")
-            sendVoiceResult(requestId, mode, transcript, audioBase64, recognitionError)
             if (pendingRequestId == requestId) {
+                sendVoiceResult(requestId, mode, transcript, audioBase64, recognitionError)
                 pendingRequestId = ""
                 pendingMode = ""
+            } else {
+                Log.w(TAG, "이미 취소되거나 교체된 요청이므로 결과 전달 생략: requestId=$requestId")
             }
             if (processingJob?.isActive == false) processingJob = null
             processingWatchdog?.let { handler.removeCallbacks(it) }
