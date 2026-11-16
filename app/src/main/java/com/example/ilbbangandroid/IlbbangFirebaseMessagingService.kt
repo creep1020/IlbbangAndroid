@@ -21,6 +21,19 @@ class IlbbangFirebaseMessagingService : FirebaseMessagingService() {
     companion object {
         private const val TAG = "IlbbangFCM"
         const val CHANNEL_ID = "ilbbang_study_notifications"
+        const val PREFS_NAME = "ilbbang_native_fcm"
+        const val TOKEN_KEY = "fcm_token"
+    }
+
+    override fun onNewToken(token: String) {
+        super.onNewToken(token)
+
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit()
+            .putString(TOKEN_KEY, token)
+            .apply()
+
+        Log.d(TAG, "새 FCM 토큰 저장 완료")
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
@@ -61,11 +74,12 @@ class IlbbangFirebaseMessagingService : FirebaseMessagingService() {
             description = "일빵빵 영어 학습 및 복습 알림"
             enableVibration(true)
             setSound(soundUri, audioAttributes)
-            lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+            lockscreenVisibility =
+                android.app.Notification.VISIBILITY_PUBLIC
         }
 
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(channel)
+        getSystemService(NotificationManager::class.java)
+            .createNotificationChannel(channel)
     }
 
     private fun showNotification(title: String, body: String) {
@@ -97,12 +111,16 @@ class IlbbangFirebaseMessagingService : FirebaseMessagingService() {
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle(title)
             .setContentText(body)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setStyle(
+                NotificationCompat.BigTextStyle().bigText(body)
+            )
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setSound(RingtoneManager.getDefaultUri(
-                RingtoneManager.TYPE_NOTIFICATION
-            ))
+            .setSound(
+                RingtoneManager.getDefaultUri(
+                    RingtoneManager.TYPE_NOTIFICATION
+                )
+            )
             .setVibrate(longArrayOf(0, 300, 200, 300))
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
