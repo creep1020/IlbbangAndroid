@@ -83,6 +83,13 @@ class MainActivity : ComponentActivity() {
             }
             browser.addJavascriptInterface(NativeVoiceBridge(), "IlbbangAndroid")
             browser.webViewClient = object : WebViewClient() {
+                override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
+                    // 페이지 새로고침/복원으로 JS 상태가 초기화될 때 네이티브 녹음 잠금도 함께 해제합니다.
+                    val staleRequest = pendingRequestId
+                    if (staleRequest.isNotEmpty()) cancelNativeVoice(staleRequest)
+                    super.onPageStarted(view, url, favicon)
+                }
+
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                     val uri = request.url
                     val isAppPage = uri.scheme == "https" &&
@@ -159,9 +166,12 @@ class MainActivity : ComponentActivity() {
                 if (recordingActive) {
                     Log.d(TAG, "사용자 요청으로 녹음 조기 종료: requestId=$requestId")
                     finishNativeRecording()
-                } else {
-                    // 녹음이 끝나고 인식 중이면 현재 인식 결과를 기다립니다.
+                } else if (processingJob?.isActive == true) {
+                    // 녹음은 끝났고 실제 인식 작업이 진행 중인 경우에만 대기 상태를 유지합니다.
                     sendVoiceStatus(requestId, "recognizing")
+                } else {
+                    // 권한 대기/시작 실패 등으로 녹음도 인식 작업도 없는 유령 요청을 정리합니다.
+                    sendVoiceError(requestId, "녹음 상태가 종료되어 다시 시작해야 합니다.")
                 }
             }
         }
@@ -509,6 +519,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        // Activity가 종료될 때 네이티브 요청/마이크/파일 잠금을 남기지 않습니다.
+        if (pendingRequestId.isNotEmpty()) cancelNativeVoice(pendingRequestId)
         processingWatchdog?.let { handler.removeCallbacks(it) }
         processingWatchdog = null
         processingJob?.cancel()
