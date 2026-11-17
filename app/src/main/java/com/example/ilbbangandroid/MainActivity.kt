@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.media.MediaRecorder
+import android.media.AudioAttributes
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -79,8 +80,26 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 ttsReady = status == TextToSpeech.SUCCESS
                 if (ttsReady) {
-                    try { textToSpeech?.language = Locale.US } catch (e: Exception) {
-                        Log.e(TAG, "영어 TTS 언어 설정 실패", e)
+                    try {
+                        val engine = textToSpeech ?: return@runOnUiThread
+                        engine.setAudioAttributes(
+                            AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_MEDIA)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                .build()
+                        )
+                        val usStatus = engine.setLanguage(Locale.US)
+                        if (usStatus < TextToSpeech.LANG_AVAILABLE) {
+                            val ukStatus = engine.setLanguage(Locale.UK)
+                            if (ukStatus < TextToSpeech.LANG_AVAILABLE) {
+                                val englishVoice = engine.voices?.firstOrNull { it.locale.language.equals("en", true) }
+                                if (englishVoice != null) engine.voice = englishVoice
+                                else Log.e(TAG, "기기에 사용 가능한 영어 TTS 음성이 없습니다. us=$usStatus uk=$ukStatus")
+                            }
+                        }
+                        Log.i(TAG, "TTS 초기화 완료: us=$usStatus")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "영어 TTS 오디오/언어 설정 실패", e)
                     }
                     val queued = pendingTtsText
                     if (!queued.isNullOrBlank()) {
@@ -283,10 +302,26 @@ class MainActivity : ComponentActivity() {
             return
         }
         try {
-            val engine = textToSpeech ?: return
-            engine.language = Locale.US
+            val engine = textToSpeech ?: run {
+                Log.e(TAG, "TTS 엔진 객체가 없습니다.")
+                return
+            }
+            val usStatus = engine.setLanguage(Locale.US)
+            if (usStatus < TextToSpeech.LANG_AVAILABLE) {
+                val ukStatus = engine.setLanguage(Locale.UK)
+                if (ukStatus < TextToSpeech.LANG_AVAILABLE) {
+                    val englishVoice = engine.voices?.firstOrNull { it.locale.language.equals("en", true) }
+                    if (englishVoice != null) engine.voice = englishVoice
+                    else {
+                        Log.e(TAG, "재생 가능한 영어 음성이 없습니다. us=$usStatus uk=$ukStatus")
+                        return
+                    }
+                }
+            }
             engine.setSpeechRate(rate.coerceIn(0.5f, 2.0f))
-            engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "ilbbang_tts_${System.currentTimeMillis()}")
+            val result = engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "ilbbang_tts_${System.currentTimeMillis()}")
+            if (result == TextToSpeech.ERROR) Log.e(TAG, "TTS speak()가 ERROR를 반환했습니다. 음성 엔진/음성 데이터/미디어 음량을 확인하세요.")
+            else Log.i(TAG, "TTS speak() 요청 성공")
         } catch (e: Exception) { Log.e(TAG, "네이티브 영어 음성 재생 실패", e) }
     }
 
