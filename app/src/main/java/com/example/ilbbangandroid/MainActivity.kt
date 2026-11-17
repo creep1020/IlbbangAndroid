@@ -248,6 +248,7 @@ class MainActivity : ComponentActivity() {
                 if (!isTrustedPage()) return@runOnUiThread
                 val safeText = text.take(500)
                 if (safeText.isBlank()) return@runOnUiThread
+                // TTS 엔진 초기화 전 요청도 보관했다가 준비되면 재생합니다.
                 pendingTtsText = safeText
                 pendingTtsRate = rate.toFloat().coerceIn(0.5f, 2.0f)
                 if (ttsReady) {
