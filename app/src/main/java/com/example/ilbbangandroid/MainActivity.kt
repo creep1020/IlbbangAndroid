@@ -18,11 +18,13 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.speech.tts.TextToSpeech
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.lifecycle.lifecycleScope
+import com.google.firebase.messaging.FirebaseMessaging
 import com.google.mlkit.genai.common.DownloadStatus
 import com.google.mlkit.genai.common.FeatureStatus
 import com.google.mlkit.genai.common.audio.AudioSource
@@ -47,6 +49,10 @@ import java.util.Locale
 class MainActivity : ComponentActivity() {
 
     private var webView: WebView? = null
+    private var textToSpeech: TextToSpeech? = null
+    private var ttsReady = false
+    private var pendingTtsText: String? = null
+    private var pendingTtsRate = 0.85f
     private val appUrl = "https://creep1020.github.io/I-ll-bang-1/"
     private val handler = Handler(Looper.getMainLooper())
 
@@ -61,6 +67,7 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val TAG = "IlbbangVoice"
         private const val MIC_PERMISSION = 1001
+        private const val NOTIFICATION_PERMISSION = 1002
         private const val RECOGNITION_TIMEOUT = 30000L
         private const val MODEL_DOWNLOAD_TIMEOUT = 60000L
         private const val PROCESSING_WATCHDOG_TIMEOUT = 95000L
@@ -68,6 +75,22 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        textToSpeech = TextToSpeech(this) { status ->
+            runOnUiThread {
+                ttsReady = status == TextToSpeech.SUCCESS
+                if (ttsReady) {
+                    try { textToSpeech?.language = Locale.US } catch (e: Exception) {
+                        Log.e(TAG, "영어 TTS 언어 설정 실패", e)
+                    }
+                    val queued = pendingTtsText
+                    if (!queued.isNullOrBlank()) {
+                        val rate = pendingTtsRate
+                        pendingTtsText = null
+                        speakNative(queued, rate)
+                    }
+                } else Log.e(TAG, "기기 TTS 엔진 초기화 실패: status=$status")
+            }
+        }
         try {
             val browser = WebView(this)
             webView = browser
@@ -88,6 +111,30 @@ class MainActivity : ComponentActivity() {
                     val staleRequest = pendingRequestId
                     if (staleRequest.isNotEmpty()) cancelNativeVoice(staleRequest)
                     super.onPageStarted(view, url, favicon)
+                }
+
+                override fun onPageFinished(view: WebView, url: String?) {
+                    super.onPageFinished(view, url)
+                    if (!isTrustedPage()) return
+                    // Firebase Android SDK에서 실제 FCM 토큰을 받아 웹앱 콜백으로 전달합니다.
+                    FirebaseMessaging.getInstance().token
+                        .addOnCompleteListener { task ->
+                            if (!task.isSuccessful) {
+                                Log.e(TAG, "FCM 토큰 발급 실패", task.exception)
+                                return@addOnCompleteListener
+                            }
+                            val token = task.result ?: return@addOnCompleteListener
+                            val quotedToken = JSONObject.quote(token)
+                            view.post {
+                                if (isTrustedPage()) {
+                                    view.evaluateJavascript(
+                                        "window.onIlbbangNativeFcmToken && window.onIlbbangNativeFcmToken($quotedToken);",
+                                        null
+                                    )
+                                }
+                            }
+                            Log.d(TAG, "FCM 토큰을 웹앱에 전달했습니다.")
+                        }
                 }
 
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -126,6 +173,7 @@ class MainActivity : ComponentActivity() {
                 val restored = browser.restoreState(savedInstanceState)
                 if (restored == null) browser.loadUrl(appUrl)
             }
+            requestNotificationPermissionIfNeeded()
         } catch (e: Exception) {
             Log.e(TAG, "앱 실행 오류", e)
             showError("앱 실행 오류\n\n${e.message ?: e.toString()}")
@@ -182,6 +230,51 @@ class MainActivity : ComponentActivity() {
                 if (isTrustedPage()) cancelNativeVoice(requestId)
             }
         }
+        @JavascriptInterface
+        fun speak(text: String, rate: Double) {
+            runOnUiThread {
+                if (!isTrustedPage()) return@runOnUiThread
+                val safeText = text.take(500)
+                if (safeText.isBlank()) return@runOnUiThread
+                pendingTtsText = safeText
+                pendingTtsRate = rate.toFloat().coerceIn(0.5f, 2.0f)
+                if (ttsReady) {
+                    pendingTtsText = null
+                    speakNative(safeText, pendingTtsRate)
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun stopSpeaking() {
+            runOnUiThread {
+                pendingTtsText = null
+                try { textToSpeech?.stop() } catch (e: Exception) {
+                    Log.w(TAG, "TTS 중지 실패", e)
+                }
+            }
+        }
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION)
+        }
+    }
+
+    private fun speakNative(text: String, rate: Float) {
+        if (!ttsReady) {
+            pendingTtsText = text
+            pendingTtsRate = rate
+            return
+        }
+        try {
+            val engine = textToSpeech ?: return
+            engine.language = Locale.US
+            engine.setSpeechRate(rate.coerceIn(0.5f, 2.0f))
+            engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "ilbbang_tts_${System.currentTimeMillis()}")
+        } catch (e: Exception) { Log.e(TAG, "네이티브 영어 음성 재생 실패", e) }
     }
 
     private fun cancelNativeVoice(requestId: String) {
@@ -544,6 +637,10 @@ class MainActivity : ComponentActivity() {
         webView?.removeJavascriptInterface("IlbbangAndroid")
         webView?.destroy()
         webView = null
+        try { textToSpeech?.stop() } catch (_: Exception) {}
+        try { textToSpeech?.shutdown() } catch (_: Exception) {}
+        textToSpeech = null
+        ttsReady = false
         super.onDestroy()
     }
 }
