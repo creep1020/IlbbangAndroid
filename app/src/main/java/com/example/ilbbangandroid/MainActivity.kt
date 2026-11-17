@@ -50,7 +50,7 @@ class MainActivity : ComponentActivity() {
 
     private var webView: WebView? = null
     private var textToSpeech: TextToSpeech? = null
-    private var ttsReady = false
+    @Volatile private var ttsReady = false
     private var pendingTtsText: String? = null
     private var pendingTtsRate = 0.85f
     private val appUrl = "https://creep1020.github.io/I-ll-bang-1/"
@@ -231,17 +231,26 @@ class MainActivity : ComponentActivity() {
             }
         }
         @JavascriptInterface
+        fun canSpeakEnglish(): Boolean {
+            if (!ttsReady) return false
+            return try {
+                val engine = textToSpeech ?: return false
+                engine.isLanguageAvailable(Locale.US) >= TextToSpeech.LANG_AVAILABLE
+            } catch (e: Exception) {
+                Log.w(TAG, "영어 TTS 사용 가능 여부 확인 실패", e)
+                false
+            }
+        }
+
+        @JavascriptInterface
         fun speak(text: String, rate: Double) {
             runOnUiThread {
-                if (!isTrustedPage()) return@runOnUiThread
+                if (!isTrustedPage() || !canSpeakEnglish()) return@runOnUiThread
                 val safeText = text.take(500)
                 if (safeText.isBlank()) return@runOnUiThread
-                pendingTtsText = safeText
+                pendingTtsText = null
                 pendingTtsRate = rate.toFloat().coerceIn(0.5f, 2.0f)
-                if (ttsReady) {
-                    pendingTtsText = null
-                    speakNative(safeText, pendingTtsRate)
-                }
+                speakNative(safeText, pendingTtsRate)
             }
         }
 
