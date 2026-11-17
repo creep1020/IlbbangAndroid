@@ -245,12 +245,15 @@ class MainActivity : ComponentActivity() {
         @JavascriptInterface
         fun speak(text: String, rate: Double) {
             runOnUiThread {
-                if (!isTrustedPage() || !canSpeakEnglish()) return@runOnUiThread
+                if (!isTrustedPage()) return@runOnUiThread
                 val safeText = text.take(500)
                 if (safeText.isBlank()) return@runOnUiThread
-                pendingTtsText = null
+                pendingTtsText = safeText
                 pendingTtsRate = rate.toFloat().coerceIn(0.5f, 2.0f)
-                speakNative(safeText, pendingTtsRate)
+                if (ttsReady) {
+                    pendingTtsText = null
+                    speakNative(safeText, pendingTtsRate)
+                }
             }
         }
 
